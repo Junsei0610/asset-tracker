@@ -3,10 +3,10 @@ import yfinance as yf
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- 설정: 페이지 기본 세팅 ---
-st.set_page_config(page_title="Junsei's Asset Tracker V8", page_icon="💸", layout="centered")
+st.set_page_config(page_title="Junsei's Asset Tracker V9", page_icon="💸", layout="centered")
 
 # --- 스타일: 다크 모드 & 폰트 ---
 st.markdown("""
@@ -29,20 +29,32 @@ def init_connection():
     client = gspread.authorize(creds)
     return client
 
+# 데이터 가져오기 (캐싱 제거: 삭제 후 즉시 반영을 위해)
 def get_data():
     client = init_connection()
     sheet_url = st.secrets["private_gsheets_url"]["spreadsheet_url"]
     sheet = client.open_by_url(sheet_url).sheet1
     data = sheet.get_all_records()
     if not data:
-        return pd.DataFrame(columns=["date", "item", "amount", "month"])
-    return pd.DataFrame(data)
+        return pd.DataFrame(columns=["date", "item", "amount", "month", "row_num"])
+    
+    df = pd.DataFrame(data)
+    # 구글 시트의 실제 행 번호 저장 (헤더가 1행이므로 데이터는 2행부터 시작)
+    # get_all_records()는 0부터 시작하므로 +2를 해야 실제 시트 행 번호와 일치
+    df['row_num'] = df.index + 2 
+    return df
 
 def add_expense_to_sheet(date, item, amount, month):
     client = init_connection()
     sheet_url = st.secrets["private_gsheets_url"]["spreadsheet_url"]
     sheet = client.open_by_url(sheet_url).sheet1
     sheet.append_row([date, item, amount, month])
+
+def delete_expense_from_sheet(row_num):
+    client = init_connection()
+    sheet_url = st.secrets["private_gsheets_url"]["spreadsheet_url"]
+    sheet = client.open_by_url(sheet_url).sheet1
+    sheet.delete_rows(row_num)
 
 # --- 기능 3: 주가 데이터 ---
 @st.cache_data(ttl=60)
@@ -71,7 +83,7 @@ def calculate_future_value(principal, rate, years):
 
 # --- UI: 헤더 ---
 today = datetime.now()
-st.title(f"🛡️ Asset Defense V8 (Cloud)")
+st.title(f"🛡️ Asset Defense V9")
 st.caption(f"☁️ Google Sheets Connected | 1$ = 150¥")
 
 # --- UI: 데이터 로드 ---
@@ -80,8 +92,7 @@ try:
     if not df.empty and 'date' in df.columns:
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
 except Exception as e:
-    # 로컬에서 실행 시 secrets가 없으면 에러가 날 수 있음. 배포 후에는 정상 작동.
-    st.warning("⚠️ 로컬 실행 중: Google Sheets 연결 대기 (배포 시 정상 작동)")
+    st.error(f"데이터 로드 실패: {e}")
     df = pd.DataFrame(columns=["date", "item", "amount", "month"])
 
 # --- UI: 월별 필터링 ---
@@ -129,11 +140,25 @@ with st.expander("💸 지출 추가하기", expanded=True):
             st.toast("☁️ 구글 시트에 저장되었습니다!")
             st.rerun()
 
-# --- UI: 내역 표시 ---
+# --- UI: 내역 삭제 (복구됨) ---
 if not df_current.empty:
     st.divider()
-    st.subheader("📋 지출 내역")
+    st.subheader("📋 지출 내역 관리")
     st.dataframe(df_current[['date', 'item', 'amount']], use_container_width=True)
+    
+    # 삭제 UI
+    with st.expander("🗑️ 내역 삭제하기"):
+        # 삭제할 목록 생성 (보이는 텍스트: 날짜 | 항목 | 금액)
+        options = df_current.to_dict('records')
+        # row_num을 키로 사용
+        option_map = {row['row_num']: f"{row['date']} | {row['item']} | {row['amount']:,}엔" for row in options}
+        
+        delete_target = st.selectbox("삭제할 항목 선택", options=option_map.keys(), format_func=lambda x: option_map[x])
+        
+        if st.button("선택한 항목 영구 삭제"):
+            delete_expense_from_sheet(delete_target)
+            st.success("삭제되었습니다. 구글 시트에서도 사라졌습니다.")
+            st.rerun()
 
 # --- UI: 자산 손실 보고서 ---
 if total_spent > 0:
